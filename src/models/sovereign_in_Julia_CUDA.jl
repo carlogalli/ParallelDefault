@@ -106,7 +106,7 @@ end
 #Main starts
 
 
-function main()
+function main(; verbose::Bool=false)
 
     #Setting parameters
     Ny = 200 #grid number of endowment
@@ -208,7 +208,9 @@ function main()
         V = δ * V + (1-δ) * V0
 
         iter += 1
-        println("Errors of round $iter: Value error: $err, price error: $PriceErr, Vd error: $VdErr")
+        if verbose
+            println(@sprintf("Errors of round %.0f: Value error: %.2e, price error: %.2e, Vd error: %.2e", iter, err, PriceErr, VdErr))
+        end
 
     end
 
@@ -217,14 +219,16 @@ function main()
 
     Vd = Vd[:,:]
 
-    println("Vr: ====================")
-    display(Vr)
-    println("Vd: ==================")
-    display(Vd)
-    println("Decision: ==================")
-    display(decision)
-    println("Price: ==================")
-    display(Price)
+    if verbose
+        println("Vr: ====================")
+        display(Vr)
+        println("Vd: ==================")
+        display(Vd)
+        println("Decision: ==================")
+        display(decision)
+        println("Price: ==================")
+        display(Price)
+    end
 
     return Vr,Vd,decision,Price
 
