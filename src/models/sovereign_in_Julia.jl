@@ -1,3 +1,8 @@
+if pwd() != "/mnt/data/code/ParallelDefault"
+    cd("ParallelDefault")
+end
+using Pkg; Pkg.activate(".")
+
 using Random, Distributions, Printf, BenchmarkTools
 #Initialization
 

@@ -1,6 +1,9 @@
-using Random, Distributions
-using CUDA
-using Base.Threads
+if pwd() != "/mnt/data/code/ParallelDefault"
+    cd("ParallelDefault")
+end
+using Pkg; Pkg.activate(".")
+
+using Random, Distributions, CUDA, Printf, BenchmarkTools
 #Initialization
 
 #-----
@@ -33,7 +36,7 @@ function def_init(sumdef,τ,Y,α)
     iy = threadIdx().x
     stride = blockDim().x
     for i = iy:stride:length(sumdef)
-        sumdef[i] = CUDA.pow(exp((1-τ)*Y[i]),(1-α))/(1-α)
+        sumdef[i] = (exp((1-τ)*Y[i])^(1-α))/(1-α)
     end
     return
 end
@@ -59,15 +62,15 @@ function vr(Nb,Ny,α,β,τ,Vr,V0,Y,B,Price0,P)
 
         Max = -Inf
         for b in 1:Nb
-            c = CUDA.exp(Y[iy]) + B[ib] - Price0[iy,b]*B[b]
+            c = exp(Y[iy]) + B[ib] - Price0[iy,b]*B[b]
             if c > 0 #If consumption positive, calculate value of return
                 sumret = 0
                 for y in 1:Ny
                     sumret += V0[y,b]*P[iy,y]
                 end
 
-                vr = CUDA.pow(c,(1-α))/(1-α) + β * sumret
-                Max = CUDA.max(Max, vr)
+                vr = (c^(1-α))/(1-α) + β * sumret
+                Max = max(Max, vr)
             end
         end
         Vr[iy,ib] = Max
@@ -104,13 +107,11 @@ end
 
 #-----
 #Main starts
-
-
-function main(; verbose::Bool=false)
+function main_gpu(; verbose::Bool=false)
 
     #Setting parameters
-    Ny = 200 #grid number of endowment
-    Nb = 200 #grid number of bond
+    Ny = 100 #grid number of endowment
+    Nb = 150 #grid number of bond
     maxInd = Ny * Nb #total grid points
     rstar = 0.017 #r* used in price calculation
     α = 0.5 #α used in utility function
@@ -161,8 +162,8 @@ function main(; verbose::Bool=false)
     iter = 0
     maxIter = 300 #Maximum interation
 
-#------
-#Based on Paper Part4, Sovereign meets C++
+    #------
+    #Based on Paper Part4, Sovereign meets C++
 
     #line 3
     while (err > tol) & (iter < maxIter)
@@ -173,7 +174,8 @@ function main(; verbose::Bool=false)
         prob = CUDA.zeros(Ny,Nb)
         decision = CUDA.ones(Ny,Nb)
         decision0 = CUDA.deepcopy(decision)
-        threadcount = (32,32) #set up defualt thread numbers per block
+        # threadcount = (16, 16) #set up defualt thread numbers per block
+        threadcount = 256
 
         #line 7
         sumdef = CUDA.zeros(Ny)
@@ -181,7 +183,9 @@ function main(; verbose::Bool=false)
 
         temp = CUDA.zeros(Ny,Ny)
 
-        blockcount = (ceil(Int,Ny/10),ceil(Int,Ny/10))
+        blockcount = 15
+        
+        # blockcount = (ceil(Int,Ny/10), ceil(Int,Ny/10))        
         @cuda threads=threadcount blocks=blockcount def_add(temp, P, β, V0, Vd0, ϕ, Ny)
         #Added this part for speed, may not work so well and untidy
         temp = sum(temp,dims=2)
@@ -189,12 +193,12 @@ function main(; verbose::Bool=false)
 
         #line 8
 
-        blockcount = (ceil(Int,Nb/10),ceil(Int,Ny/10))
+        # blockcount = (ceil(Int,Nb/10),ceil(Int,Ny/10))
         @cuda threads=threadcount blocks=blockcount vr(Nb,Ny,α,β,τ,Vr,V0,Y,B,Price0,P)
 
         #line 9-14
 
-        blockcount = (ceil(Int,Nb/10),ceil(Int,Ny/10))
+        # blockcount = (ceil(Int,Nb/10),ceil(Int,Ny/10))
         @cuda threads=threadcount blocks=blockcount Decide(Nb,Ny,Vd,Vr,V,decision,decision0,prob,P,Price,rstar)
 
         #line 16
@@ -234,8 +238,23 @@ function main(; verbose::Bool=false)
 
 end
 
+##
 
-@time VReturn, VDefault, Decision, Price = main()
+ny = 100
+nb = 150
+
+kernel = @cuda launch=false def_init(CUDA.zeros(ny), 0.5, CuArray(-5*sqrt((0.025^2)/(1-0.025^2)):sqrt((0.025^2)/(1-0.9^2)):5*sqrt((0.025^2)/(1-0.9^2))), 0.5)
+config = launch_configuration(kernel.fun)
+threads = min(ny*nb, config.threads)
+blocks = cld(ny*nb, threads)
+# 4992 
+
+##
+
+@time VReturn, VDefault, Decision, Price = main_gpu();
+@btime main_gpu();
+
+
 
 #-----
 #Storing matrices as CSV
