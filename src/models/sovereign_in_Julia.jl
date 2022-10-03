@@ -2,7 +2,7 @@
 #     cd("ParallelDefault")
 # end
 if pwd() != "/home/carlo/Documents/ParallelDefault"
-    cd("Documents/ParallelDefault")
+    cd("/home/carlo/Documents/ParallelDefault")
 end
 using Pkg; Pkg.activate(".")
 
@@ -29,39 +29,82 @@ function tauchen(ρ, σ, Ny, P)
     end
 end
 
-function bo_cpu(V, Vr, Vd, Price, decision,
-                Ny, Nb, Y, B, 
-                τ, θ, β, rstar)
+struct ModelCPU
+    Ny::Int32
+    Nb::Int32
+    rstar::Float32
+    lbd::Float32
+    ubd::Float32
+    β::Float32
+    θ::Float32
+    ϕ::Float32
+    δ::Float32
+    ρ::Float32
+    σ::Float32
+    τ::Float32
+end
 
-    V0 = deepcopy(V)
-    Vd0 = deepcopy(Vd)
-    Price0 = deepcopy(Price)
-    prob = zeros(Ny, Nb)
+function ModelCPU(; Ny=21, Nb=100, rstar=0.017, lbd=-1, ubd=0, β=0.953, θ=0.282, ϕ=0.5, δ=0.8, ρ=0.9, σ=0.025, τ=0.5)
 
-    for ib in 1:Nb
-        for iy = 1:Ny
+    return ModelCPU(Ny, Nb, rstar, lbd, ubd, β, θ, ϕ, δ, ρ, σ, τ)
+end
+
+function initModelCPU(m::ModelGPU)
+    
+    #Initializing Bond matrix
+    minB = m.lbd; 
+    maxB = m.ubd; 
+    step = (maxB-minB) / (m.Nb-1)
+    B = minB:step:maxB
+
+    #Intitializing Endowment matrix
+    σ_z = sqrt((m.σ^2)/(1-m.ρ^2))
+    Step = 10*σ_z/(m.Ny-1)
+    Y = -5*σ_z:Step:5*σ_z
+
+    #Conditional Probability matrix
+    P = zeros(Ny, Ny)
+    tauchen(m.ρ, m.σ, m.Ny, Pcpu)
+
+    #Utility function
+    U(x) = x^(1-m.ϕ) / (1-m.ϕ) 
+
+    #Initialise arrays
+    V = fill(1/((1-m.β)*(1-m.ϕ)), m.Ny, m.Nb)    
+    Vr = zeros(m.Ny, m.Nb)
+    Vd = zeros(m.Ny)
+    Price = fill(1/(1+m.rstar), m.Ny, m.Nb)
+    decision = ones(m.Ny, m.Nb)
+    prob = zeros(m.Ny, m.Nb)
+
+    return V, Vr, Vd, Price, decision, prob, P, Y, B
+end
+
+function bo_cpu(m, V, Vr, Vd, Price, decision, prob, P, Y, B)
+
+    for ib in 1:m.Nb
+        for iy = 1:m.Ny
 
 
             #compute default and repayment
-            #7
             
-            sumdef = U(exp((1-τ)*Y[iy]))
-            for y in 1:Ny
-                sumdef += (β* P[iy,y]* (θ* V0[y,1] + (1-θ)* Vd0[y]))
+            sumdef = U(exp((1-m.τ)*Y[iy]))
+            for y in 1:m.Ny
+                sumdef += (m.β* P[iy,y]* (m.θ* V[y,1] + (1-m.θ)* Vd[y]))
             end
             Vd[iy] = sumdef
 
             #8
 
             Max = -Inf
-            for b in 1:Nb
-                c = exp(Y[iy]) + B[ib] - Price0[iy,b]*B[b]
+            for b in 1:m.Nb
+                c = exp(Y[iy]) + B[ib] - Price[iy,b]*B[b]
                 if c > 0
                     sumret = 0
-                    for y in 1:Ny
-                        sumret += P[iy,y]*V0[y,b]
+                    for y in 1:m.Ny
+                        sumret += P[iy,y]*V[y,b]
                     end
-                    vr = U(c) + β * sumret
+                    vr = U(c) + m.β * sumret
                     Max = max(Max, vr)
                 end
             end
@@ -78,35 +121,15 @@ function bo_cpu(V, Vr, Vd, Price, decision,
             end
 
             #calculate debt price
-            for y in 1:Ny
+            for y in 1:m.Ny
                 prob[iy,ib] += P[iy,y] * decision[y,ib]
             end
-            Price[iy,ib] = (1-prob[iy,ib]) / (1+rstar)
-
+            Price[iy,ib] = (1-prob[iy,ib]) / (1+m.rstar)
         end
     end
 end
 
-function main_cpu(; verbose::Bool=false, maxIter::Int=300)
-
-    Ny = 21
-    Nb = 100
-    maxInd = Ny * Nb
-    rstar = 0.017
-    lbd = -1
-    ubd = 0
-    β = 0.953
-    # τ = 0.15          # appears below too
-    θ = 0.282
-    # tol = 1e-10       # appears below too
-    ϕ = 0.5
-    δ = 0.8
-    ρ = 0.9
-    σ = 0.025
-    τ = 0.5
-
-    # B = zeros(Nb)     # useless command
-    # Y = zeros(Ny)     # useless command
+function main_cpu(m; verbose::Bool=false, maxIter::Int=300)
 
     #Initialize Bond grid
     minB = lbd
@@ -237,10 +260,8 @@ end
 
 ##
 
-@time VReturn, VDefault, Decision, Price = main_cpu(verbose=false, maxIter=250);
+VReturn, VDefault, Decision, Price = main_cpu(verbose=false, maxIter=250);
 
-p_cpu = plot(title="cpu",[VReturn[:,50], VDefault])
-gui(p_cpu)
 
 
 ##
