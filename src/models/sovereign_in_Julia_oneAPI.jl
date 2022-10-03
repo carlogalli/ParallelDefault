@@ -1,12 +1,14 @@
 if pwd() != "/home/carlo/Documents/ParallelDefault"
-    cd("ParallelDefault")
+    cd("Documents/ParallelDefault")
 end
 using Pkg; Pkg.activate(".")
 
-using Distributions, oneAPI, Printf, BenchmarkTools
-#Initialization
+using Distributions, oneAPI, Printf, BenchmarkTools, Test
 
-#-----
+
+
+##
+#= Function definitions =#
 
 #tauchen method for creating conditional probability matrix
 function tauchen(ρ, σ, Ny, P)
@@ -31,48 +33,51 @@ end
 
 
 #line 7.1 Intitializing U((1-τ)iy) to each Vd[iy]
-function def_init(sumdef,τ,Y,α)
-    iy = threadIdx().x
-    stride = blockDim().x
-    for i = iy:stride:length(sumdef)
-        sumdef[i] = (exp((1-τ)*Y[i])^(1-α))/(1-α)
+function def_init(sumdef, τ, Y, α, Ny)
+    y0 = get_global_id(0)       # thread index
+    if (y0 <= Ny)
+        sumdef[y0] = (exp((1-τ)*Y[y0])^(1-α))/(1-α)
     end
     return
 end
 
 #line 7.2 adding second expected part to calcualte Vd[iy]
 function def_add(matrix, P, β, V0, Vd0, ϕ, Ny)
-    y = (blockIdx().x-1)*blockDim().x + threadIdx().x
-    iy = (blockIdx().y-1)*blockDim().y + threadIdx().y
-
-    if (iy <= Ny && y <= Ny)
-        matrix[iy,y] = β* P[iy,y]* (ϕ* V0[y,1] + (1-ϕ)* Vd0[y])
+    y0 = get_global_id(0)
+    y1 = get_global_id(1)
+    
+    if (y0 <= Ny && y1 <= Ny)
+        matrix[y0,y1] = β* P[y0,y1]* (ϕ* V0[y1,1] + (1-ϕ)* Vd0[y1])
     end
     return
 end
 
 #line 8 Calculate Vr, still a double loop inside, tried to flatten out another loop
-function vr(Nb,Ny,α,β,τ,Vr,V0,Y,B,Price0,P)
+function vr(Nb,Ny,α,β,Vr,V0,Y,B,Price0,P)
 
-    ib = (blockIdx().x-1)*blockDim().x + threadIdx().x
-    iy = (blockIdx().y-1)*blockDim().y + threadIdx().y
+    # ib = (blockIdx().x-1)*blockDim().x + threadIdx().x
+    # iy = (blockIdx().y-1)*blockDim().y + threadIdx().y
+    ib0 = get_global_id(0)
+    iy0 = get_global_id(1)
+    
+    # oneAPI.@println("ib0 $ib0 iy0 $iy0")
 
-    if (ib <= Nb && iy <= Ny)
+    if (ib0 <= Nb && iy0 <= Ny)        
 
-        Max = -Inf
-        for b in 1:Nb
-            c = exp(Y[iy]) + B[ib] - Price0[iy,b]*B[b]
+        Max = Float32(-Inf)
+        for ib1 in 1:Nb
+            c = exp(Y[iy0]) + B[ib0] - Price0[iy0,ib1]*B[ib1]            
             if c > 0 #If consumption positive, calculate value of return
                 sumret = 0
-                for y in 1:Ny
-                    sumret += V0[y,b]*P[iy,y]
+                for iy1 in 1:Ny
+                    sumret += V0[iy1,ib1]*P[iy0,iy1]
                 end
 
                 vr = (c^(1-α))/(1-α) + β * sumret
                 Max = max(Max, vr)
             end
         end
-        Vr[iy,ib] = Max
+        Vr[iy0,ib0] = Max
     end
     return
 end
@@ -81,128 +86,120 @@ end
 #line 9-14 debt price update
 function Decide(Nb,Ny,Vd,Vr,V,decision,decision0,prob,P,Price,rstar)
 
-    ib = (blockIdx().x-1)*blockDim().x + threadIdx().x
-    iy = (blockIdx().y-1)*blockDim().y + threadIdx().y
+    # ib = (blockIdx().x-1)*blockDim().x + threadIdx().x
+    # iy = (blockIdx().y-1)*blockDim().y + threadIdx().y
+    ib0 = get_global_id(0)
+    iy0 = get_global_id(1)
 
-    if (ib <= Nb && iy <= Ny)
+    if (ib0 <= Nb && iy0 <= Ny)
 
-        if (Vd[iy] < Vr[iy,ib])
-            V[iy,ib] = Vr[iy,ib]
-            decision[iy,ib] = 0
+        if (Vd[iy0] < Vr[iy0,ib0])
+            V[iy0,ib0] = Vr[iy0,ib0]
+            decision[iy0,ib0] = Int32(0)
         else
-            V[iy,ib] = Vd[iy]
-            decision[iy,ib] = 1
+            V[iy0,ib0] = Vd[iy0]
+            decision[iy0,ib0] = Int32(1)
         end
 
-        for y in 1:Ny
-            prob[iy,ib] += P[iy,y] * decision[y,ib]
+        for iy1 in 1:Ny
+            prob[iy0,ib0] += P[iy0,iy1] * decision[iy1,ib0]
         end
 
-        Price[iy,ib] = (1-prob[iy,ib]) / (1+rstar)
+        Price[iy0,ib0] = (1-prob[iy0,ib0]) / (1+rstar)
 
     end
     return
 end
 
-#-----
-#Main starts
+
+#= Main starts =#
 function main_gpu(; verbose::Bool=false)
 
     #Setting parameters
-    Ny = 100 #grid number of endowment
-    Nb = 150 #grid number of bond
-    maxInd = Ny * Nb #total grid points
-    rstar = 0.017 #r* used in price calculation
-    α = 0.5 #α used in utility function
-
-    #lower bound and upper bound for bond initialization
-    lbd = -1
-    ubd = 0
-
-    #β,ϕ,τ used as in part 4 of original paper
-    β = 0.953
-    ϕ = 0.282
-    τ = 0.5
-
-    δ = 0.8 #weighting average of new and old matrixs
-
-    #ρ,σ For tauchen method
-    ρ = 0.9
-    σ = 0.025
+    Ny = Int32(100)     #grid number of endowment
+    Nb = Int32(150)     #grid number of bond
+    maxInd = Ny * Nb    #total grid points
+    rstar = Float32(0.017) #r* used in price calculation
+    α = Float32(0.5)    #α used in utility function
+    lbd = Float32(-1)   #lower bound and upper bound for bond initialization
+    ubd = Float32(0)    #lower bound and upper bound for bond initialization
+    β = Float32(0.953)  #β,ϕ,τ used as in part 4 of original paper
+    ϕ = Float32(0.282)  #β,ϕ,τ used as in part 4 of original paper
+    τ = Float32(0.5)    #β,ϕ,τ used as in part 4 of original paper
+    δ = Float32(0.8)    #weighting average of new and old matrixs
+    ρ = Float32(0.9)    #ρ,σ For tauchen method
+    σ = Float32(0.025)  #ρ,σ For tauchen method
 
 
     #Initializing Bond matrix
     minB = lbd
     maxB = ubd
     step = (maxB-minB) / (Nb-1)
-    B = CuArray(minB:step:maxB) #Bond
+    B = oneArray{Float32}(minB:step:maxB) #Bond grid
 
     #Intitializing Endowment matrix
     σ_z = sqrt((σ^2)/(1-ρ^2))
     Step = 10*σ_z/(Ny-1)
-    Y = CuArray(-5*σ_z:Step:5*σ_z) #Endowment
+    Y = oneArray{Float32}(-5*σ_z:Step:5*σ_z) #Endowment
 
-    Pcpu = zeros(Ny,Ny)  #Conditional probability matrix
-    V = CUDA.fill(1/((1-β)*(1-α)),Ny, Nb) #Value
-    Price = CUDA.fill(1/(1+rstar),Ny, Nb) #Debt price
-    Vr = CUDA.zeros(Ny, Nb) #Value of good standing
-    Vd = CUDA.zeros(Ny) #Value of default
-    decision = CUDA.ones(Ny,Nb) #Decision matrix
-
-
-    U(x) = x^(1-α) / (1-α) #Utility function
-
-    #Initialize Conditional Probability matrix
+    #Conditional Probability matrix
+    Pcpu = zeros(Ny,Ny)
     tauchen(ρ, σ, Ny, Pcpu)
-    P = CuArray(Pcpu)
+    P = oneArray{Float32}(Pcpu)
+
+    #Utility function
+    U(x) = x^(1-α) / (1-α) 
+
+    #Initialise arrays
+    V = oneArray{Float32}(fill(1/((1-β)*(1-α)), Ny, Nb))    #Value
+    Price = oneArray{Float32}(fill(1/(1+rstar),Ny, Nb))     #Debt price
+    Vr = oneAPI.zeros(Float32, Ny, Nb)                      #Value of good standing
+    Vd = oneAPI.zeros(Float32, Ny)                          #Value of default
+    decision = oneAPI.ones(Float32, Ny,Nb)                  #Decision matrix
 
     err = 2000 #error
     tol = 1e-6 #error toleration
     iter = 0
     maxIter = 300 #Maximum interation
 
-    #------
+
     #Based on Paper Part4, Sovereign meets C++
 
-    #line 3
     while (err > tol) & (iter < maxIter)
         #Keeping copies of Value, Value of defualt, Price for the previous round
-        V0 = CUDA.deepcopy(V)
-        Vd0 = CUDA.deepcopy(Vd)
-        Price0 = CUDA.deepcopy(Price)
-        prob = CUDA.zeros(Ny,Nb)
-        decision = CUDA.ones(Ny,Nb)
-        decision0 = CUDA.deepcopy(decision)
-        # threadcount = (16, 16) #set up defualt thread numbers per block
-        threadcount = 256
-
-        #line 7
-        sumdef = CUDA.zeros(Ny)
-        @cuda threads=64 def_init(sumdef,τ,Y,α)
-
-        temp = CUDA.zeros(Ny,Ny)
-
-        blockcount = 15
+        V0 = oneAPI.deepcopy(V)
+        Vd0 = oneAPI.deepcopy(Vd)
+        Price0 = oneAPI.deepcopy(Price)
+        prob = oneAPI.zeros(Float32, Ny,Nb)
+        decision = oneAPI.ones(Float32, Ny,Nb)
+        decision0 = oneAPI.deepcopy(decision)
         
-        # blockcount = (ceil(Int,Ny/10), ceil(Int,Ny/10))        
-        @cuda threads=threadcount blocks=blockcount def_add(temp, P, β, V0, Vd0, ϕ, Ny)
+        numthreads = 16
+        threadcount = (numthreads, numthreads) #set up default thread numbers per block
+
+        #Initialise the default value
+        sumdef = oneAPI.zeros(Float32, Ny)
+        @oneapi items=Ny def_init(sumdef,τ,Y,α,Ny)
+
+        #Compute the 2nd part of the default value
+        temp = oneAPI.zeros(Float32, Ny,Ny)
+        blockcount = (cld(Ny, numthreads), cld(Ny, numthreads))
+        @oneapi items=threadcount groups=blockcount def_add(temp, P, β, V0, Vd0, ϕ, Ny)
+
         #Added this part for speed, may not work so well and untidy
         temp = sum(temp,dims=2)
         Vd = sumdef + temp
 
-        #line 8
+        #Compute the repayment value
+        blockcount = (cld(Nb, nt), cld(Ny, nt))
+        @oneapi items=threadcount groups=blockcount vr(Nb,Ny,α,β,Vr,V0,Y,B,Price0,P)
 
-        # blockcount = (ceil(Int,Nb/10),ceil(Int,Ny/10))
-        @cuda threads=threadcount blocks=blockcount vr(Nb,Ny,α,β,τ,Vr,V0,Y,B,Price0,P)
+        #Compute price and decision rules
+        blockcount = (cld(Nb, nt), cld(Ny, nt))
+        @oneapi items=threadcount groups=blockcount Decide(Nb,Ny,Vd,Vr,V,decision,decision0,prob,P,Price,rstar)
 
-        #line 9-14
-
-        # blockcount = (ceil(Int,Nb/10),ceil(Int,Ny/10))
-        @cuda threads=threadcount blocks=blockcount Decide(Nb,Ny,Vd,Vr,V,decision,decision0,prob,P,Price,rstar)
-
-        #line 16
-        #update Error and value matrix at round end
-
+        
+        #Update error and value matrix at round end
         err = maximum(abs.(V-V0))
         PriceErr = maximum(abs.(Price-Price0))
         VdErr = maximum(abs.(Vd-Vd0))
@@ -220,7 +217,7 @@ function main_gpu(; verbose::Bool=false)
     #Print final results
     println("Total Round ",iter)
 
-    Vd = Vd[:,:]
+    # Vd = Vd[:,:]
 
     if verbose
         println("Vr: ====================")
@@ -233,24 +230,16 @@ function main_gpu(; verbose::Bool=false)
         display(Price)
     end
 
-    return Vr,Vd,decision,Price
+    return Vr, Vd, decision, Price
 
 end
 
-##
 
-ny = 100
-nb = 150
-
-kernel = @cuda launch=false def_init(CUDA.zeros(ny), 0.5, CuArray(-5*sqrt((0.025^2)/(1-0.025^2)):sqrt((0.025^2)/(1-0.9^2)):5*sqrt((0.025^2)/(1-0.9^2))), 0.5)
-config = launch_configuration(kernel.fun)
-threads = min(ny*nb, config.threads)
-blocks = cld(ny*nb, threads)
-# 4992 
 
 ##
 
-@time VReturn, VDefault, Decision, Price = main_gpu();
+VReturn, VDefault, Decision, Price = main_gpu(verbose=true);
+
 @btime main_gpu();
 
 
