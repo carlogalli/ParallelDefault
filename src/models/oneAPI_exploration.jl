@@ -1,9 +1,9 @@
 if pwd() != "/home/carlo/Documents/ParallelDefault"
-    cd("ParallelDefault")
+    cd("Documents/ParallelDefault")
 end
 using Pkg; Pkg.activate(".")
 
-using Distributions, oneAPI, Printf, BenchmarkTools, Test
+using Distributions, oneAPI, Printf, BenchmarkTools, Test, Plots
 #Initialization
 
 
@@ -12,19 +12,19 @@ using Distributions, oneAPI, Printf, BenchmarkTools, Test
 
 
 #Setting parameters
-Ny = Int32(100) #grid number of endowment
-Nb = Int32(150) #grid number of bond
-maxInd = Ny * Nb #total grid points
+Ny = Int32(100)     #grid number of endowment
+Nb = Int32(150)     #grid number of bond
+maxInd = Ny * Nb    #total grid points
 rstar = Float32(0.017) #r* used in price calculation
-α = Float32(0.5) #α used in utility function
-lbd = Float32(-1) #lower bound and upper bound for bond initialization
-ubd = Float32(0)  #lower bound and upper bound for bond initialization
-β = Float32(0.953)   #β,ϕ,τ used as in part 4 of original paper
-ϕ = Float32(0.282)   #β,ϕ,τ used as in part 4 of original paper
-τ = Float32(0.5) #β,ϕ,τ used as in part 4 of original paper
-δ = Float32(0.8) #weighting average of new and old matrixs
-ρ = Float32(0.9)     #ρ,σ For tauchen method
-σ = Float32(0.025)   #ρ,σ For tauchen method
+α = Float32(0.5)    #α used in utility function
+lbd = Float32(-1)   #lower bound and upper bound for bond initialization
+ubd = Float32(0)    #lower bound and upper bound for bond initialization
+β = Float32(0.953)  #β,ϕ,τ used as in part 4 of original paper
+ϕ = Float32(0.282)  #β,ϕ,τ used as in part 4 of original paper
+τ = Float32(0.5)    #β,ϕ,τ used as in part 4 of original paper
+δ = Float32(0.8)    #weighting average of new and old matrixs
+ρ = Float32(0.9)    #ρ,σ For tauchen method
+σ = Float32(0.025)  #ρ,σ For tauchen method
 
 
 #Initializing Bond matrix
@@ -104,7 +104,7 @@ function def_init!(sumdef, τ, Y, α, Ny)
     return
 end
 
-@oneapi items=10 def_init!(sumdef,τ,Y,α,Ny)
+@oneapi items=Ny def_init!(sumdef,τ,Y,α,Ny)
 
 
 
@@ -212,8 +212,8 @@ threadcount = (nt, nt)
 blockcount = (cld(Nb, nt), cld(Ny, nt))
 @oneapi items=threadcount groups=blockcount Decide(Nb,Ny,Vd,Vr,V,decision,decision0,prob,P,Price,rstar)
 
-#line 16
-#update Error and value matrix at round end
+##
+#= update Error and value matrix at round end =#
 
 err = maximum(abs.(V-V0))
 PriceErr = maximum(abs.(Price-Price0))
@@ -224,38 +224,102 @@ V = δ * V + (1-δ) * V0
 
 
 
-##
 
-ny = 100
-nb = 150
-
-kernel = @cuda launch=false def_init(CUDA.zeros(ny), 0.5, CuArray(-5*sqrt((0.025^2)/(1-0.025^2)):sqrt((0.025^2)/(1-0.9^2)):5*sqrt((0.025^2)/(1-0.9^2))), 0.5)
-config = launch_configuration(kernel.fun)
-threads = min(ny*nb, config.threads)
-blocks = cld(ny*nb, threads)
-# 4992 
 
 ##
+#= debug GPU =#
 
-@time VReturn, VDefault, Decision, Price = main_gpu();
-@btime main_gpu();
+#Setting parameters
+Ny = Int32(21)     #grid number of endowment
+Nb = Int32(100)     #grid number of bond
+# maxInd = Ny * Nb    #total grid points
+rstar = Float32(0.017) #r* used in price calculation
+lbd = Float32(-1)   #lower bound and upper bound for bond initialization
+ubd = Float32(0)    #lower bound and upper bound for bond initialization
+β = Float32(0.953)  #β,θ,τ used as in part 4 of original paper
+θ = Float32(0.282)  #β,θ,τ used as in part 4 of original paper
+ϕ = Float32(0.5)    #ϕ used in utility function
+δ = Float32(0.8)   #updating weight of new matrix
+ρ = Float32(0.9)    #ρ,σ For tauchen method
+σ = Float32(0.025)  #ρ,σ For tauchen method
+τ = Float32(0.5)    #β,θ,τ used as in part 4 of original paper
+
+minB = lbd
+maxB = ubd
+step = (maxB-minB) / (Nb-1)
+B = oneArray{Float32}(minB:step:maxB) #Bond grid
+
+σ_z = sqrt((σ^2)/(1-ρ^2))
+Step = 10*σ_z/(Ny-1)
+Y = oneArray{Float32}(-5*σ_z:Step:5*σ_z) #Endowment
+
+Pcpu = zeros(Ny,Ny)
+tauchen(ρ, σ, Ny, Pcpu)
+P = oneArray{Float32}(Pcpu)
 
 
+##
 
-#-----
-#Storing matrices as CSV
-#=
 
-using Parsers
-using DataFrames
-using CSV
+# VReturn_gpu, VDefault_gpu, Decision_gpu, Price_gpu
+V_gpu = max.(VReturn_gpu, VDefault_gpu)
 
-dfPrice = DataFrame(Array(Price))
-dfVr = DataFrame(Array(VReturn))
-dfVd = DataFrame(Array(VDefault))
-dfDecision = DataFrame(Array(Decision))
+nt = 16
+threadcount = (nt, nt)
+blockcount = (cld(Nb, nt), cld(Ny, nt))
+@oneapi items=threadcount groups=blockcount vr(Nb,Ny,ϕ,β,VReturn_gpu,V_gpu,Y,B,Price_gpu, P)
 
-CSV.write("./Price.csv", dfPrice)
-CSV.write("./Vr.csv", dfVr)
-CSV.write("./Vd.csv", dfVd)
-CSV.write("./Decision.csv", dfDecision)
+function bench(Nb,Ny,α,β,Vr,V0,Y,B,Price0,P)
+    nt = 16
+    threadcount = (nt, nt)
+    blockcount = (cld(Nb, nt), cld(Ny, nt))
+    @oneapi items=threadcount groups=blockcount vr(Nb,Ny,ϕ,β,Vr,V0,Y,B,Price0,P)
+    return nothing
+end
+
+@btime bench(Nb,Ny,ϕ,β,VReturn_gpu,V_gpu,Y,B,Price_gpu, P) # 27.9 μs
+
+bo_gpu(V_gpu, VDefault_gpu, Price_gpu, Decision_gpu, Ny, Nb, Y, B, τ, ϕ, P, β, θ, rstar, 0)
+@btime bo_gpu($V_gpu, $VDefault_gpu, $Price_gpu, $Decision_gpu, $Ny, $Nb, $Y, $B, $τ, $ϕ, $P, $β, $θ, $rstar, 0)
+# 2.62 ms
+
+
+##
+#= debug CPU =#
+
+y = 21
+Nb = 100
+maxInd = Ny * Nb
+rstar = 0.017
+lbd = -1
+ubd = 0
+β = 0.953
+θ = 0.282
+ϕ = 0.5
+δ = 0.8
+ρ = 0.9
+σ = 0.025
+τ = 0.5
+minB = lbd
+maxB = ubd
+step = (maxB-minB) / (Nb-1)
+B = minB:step:maxB
+
+σ_z = sqrt((σ^2)/(1-ρ^2))
+Step = 10*σ_z/(Ny-1)
+Y = -5*σ_z:Step:5*σ_z
+
+P = zeros(Ny,Ny)
+tauchen(ρ, σ, Ny, P)
+
+U(x) = x^(1-ϕ) / (1-ϕ)
+
+##
+
+# VReturn, VDefault, Decision, Price
+V = max.(VReturn, VDefault)
+bo_cpu(V, VReturn, VDefault, Price, Decision, Ny, Nb, Y, B, τ, ϕ, β, rstar)
+
+
+@btime bo_cpu($V, $VReturn, $VDefault, $Price, $Decision, $Ny, $Nb, $Y, $B, $τ, $ϕ, $β, $rstar) 
+# 223 ms
