@@ -157,6 +157,7 @@ sumdef = CUDA.zeros(Ny)
 tid = CUDA.zeros(Ny)
 bid = CUDA.zeros(Ny)
 # Intitializing value of default U((1-τ)iy) to each Vd[iy]
+
 function def_init!(sumdef,tid,bid,τ,Y,α)
     iy = threadIdx().x
     stride = blockDim().x
