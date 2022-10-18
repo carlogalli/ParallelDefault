@@ -1,9 +1,4 @@
-if pwd() != "/mnt/data/code/ParallelDefault"
-    cd("ParallelDefault")
-end
-using Pkg; Pkg.activate(".")
-
-using Random, Distributions, Printf, BenchmarkTools
+using Random, Distributions
 #Initialization
 
 function tauchen(ρ, σ, Ny, P)
@@ -26,9 +21,9 @@ function tauchen(ρ, σ, Ny, P)
     end
 end
 
-function main(; verbose::Bool=false)
+function main()
 
-    Ny = 21
+    Ny = 7
     Nb = 100
     maxIter = 500
     maxInd = Ny * Nb
@@ -94,10 +89,8 @@ function main(; verbose::Bool=false)
         for ib in 1:Nb
             for iy = 1:Ny
 
-
                 #compute default and repayment
                 #7
-                
                 sumdef = U(exp((1-τ)*Y[iy]))
                 for y in 1:Ny
                     sumdef += (β* P[iy,y]* (θ* V0[y,1] + (1-θ)* Vd0[y]))
@@ -105,7 +98,6 @@ function main(; verbose::Bool=false)
                 Vd[iy] = sumdef
 
                 #8
-
                 Max = -Inf
                 for b in 1:Nb
                     c = exp(Y[iy]) + B[ib] - Price0[iy,b]*B[b]
@@ -135,9 +127,9 @@ function main(; verbose::Bool=false)
                     prob[iy,ib] += P[iy,y] * decision[y,ib]
                 end
                 Price[iy,ib] = (1-prob[iy,ib]) / (1+rstar)
-
             end
         end
+
 
         err = maximum(abs.(V-V0))
         PriceErr = maximum(abs.(Price-Price0))
@@ -146,33 +138,28 @@ function main(; verbose::Bool=false)
         Price = δ * Price + (1-δ) * Price0
         V = δ * V + (1-δ) * V0
         iter = iter + 1
-        if verbose
-            println(@sprintf("Errors of round %.0f: Value error: %.2e, price error: %.2e, Vd error: %.2e", iter, err, PriceErr, VdErr))
-        end
+        println("Errors of round $iter: Value error: $err, price error: $PriceErr, Vd error: $VdErr")
 
     end
+
 
     println("Total Round ",iter)
 
     Vd = Vd[:,:]
 
-    if verbose
-        println("Vr: ====================")
-        display(Vr)
-        println("Vd: ==================")
-        display(Vd)
-        println("Decision: ==================")
-        display(decision)
-        println("Price: ==================")
-        display(Price)
-    end
+    println("Vr: ====================")
+    display(Vr)
+    println("Vd: ==================")
+    display(Vd)
+    println("Decision: ==================")
+    display(decision)
+    println("Price: ==================")
+    display(Price)
 
     return Vr,Vd,decision,Price
-
 end
 
-@time VReturn, VDefault, Decision, Price = main();
-@btime main();
+@time VReturn, VDefault, Decision, Price = main()
 
 #= Storing as CSV
 
