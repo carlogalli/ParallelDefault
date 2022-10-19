@@ -3,9 +3,9 @@ if pwd() != "/mnt/data/code/ParallelDefault"
 end
 using Pkg; Pkg.activate(".")
 
-using Random, Distributions, CUDA, Printf, BenchmarkTools, Optim
+using Random, Distributions, CUDA, Printf, BenchmarkTools
 
-struct Model_CPU
+struct Model_GPU
     # Model Parameters
     β::Float32      # df govt
     β_hh::Float32   # df hh
@@ -36,7 +36,7 @@ struct Model_CPU
     Bgrid_ub::Float32
 end
 
-function Model_CPU(;
+function Model_GPU(;
     β=.83, β_hh=.99, σ=2., α_m=2e-5, η=3., γ=2., g_lb=0., α_g=0.074, r=0.00598,
     ρ=0.9293, σ_ϵ=0.0115, θ=0.282, h=0.37, d0=-0.4, d1=0.44, 
     ρ_B=1e-3, ρ_μ=1e-3, ρ_δ=1e-3, λ=0.0465, κ=0.,
@@ -45,7 +45,7 @@ function Model_CPU(;
 
     N = ny*nB
 
-    return Model_CPU(β, β_hh, σ, α_m, η, γ, g_lb, α_g, r, ρ, σ_ϵ, θ, h, d0, d1, ρ_B, ρ_μ, ρ_δ, λ, κ, ny, nB, N, Bgrid_lb, Bgrid_ub)
+    return Model_GPU(β, β_hh, σ, α_m, η, γ, g_lb, α_g, r, ρ, σ_ϵ, θ, h, d0, d1, ρ_B, ρ_μ, ρ_δ, λ, κ, ny, nB, N, Bgrid_lb, Bgrid_ub)
 end
 
 function tauchen_carlo(N::Int32, ρ::Float32, σ_ϵ::Float32; μ::Real=0, n_std::Real=3)
@@ -88,12 +88,12 @@ function tauchen_carlo(N::Int32, ρ::Float32, σ_ϵ::Float32; μ::Real=0, n_std:
     return grid, P
 end
 
-function ydef_fn(m::Model_CPU, y::Float32)
+function ydef_fn(m::Model_GPU, y::Float32)
     return y - max(0, m.d0*y + m.d1*y^2)
 end
 
 #Utility function
-function u_fn(x::Float32, σ::Float32, α::Float32)
+function u_fn(x, σ, α)
     # if σ!=1
     #     return α * (max(x, 1e-14)^(1-σ))/(1-σ)
     # elseif σ==1
@@ -106,7 +106,7 @@ function u_fn(x::Float32, σ::Float32, α::Float32)
         )
 end
 
-function U_fn(m::Model_CPU, c::Float32, rb::Float32)
+function U_fn(m, c, rb)
     return u_fn(c, m.σ, 1.) + u_fn(rb, m.η, m.α_m)
 end
 
@@ -238,10 +238,8 @@ function my_brent(
     end
 end
 
-##
 
-
-m = Model_CPU(nB=12, ny=11)
+m = Model_GPU(nB=10, ny=10)
 
 # Bond grid
 Bgrid = collect(range(m.Bgrid_lb, stop=m.Bgrid_ub, length=m.nB))
@@ -275,8 +273,6 @@ arrays_temp = (vs, cs, rbs, μs, qs, is, cps)
 # vd, c_def, rb_def, Bprime_def, μ_def, i_def, q_def, qtilde_def = arrays_def
 
 
-##
-
 
 function model_init!(m, grids, arrays_rep, arrays_def)
     Bgrid, ygrid, ~ = grids
@@ -285,8 +281,8 @@ function model_init!(m, grids, arrays_rep, arrays_def)
 
     B0 = (blockIdx().x-1)*blockDim().x + threadIdx().x
     y0 = (blockIdx().y-1)*blockDim().y + threadIdx().y
-    tid_x, tid_y, bid_x, bid_y = threadIdx().x, threadIdx().y, blockIdx().x, blockIdx().y
-    @cuprintln("y0 $y0, B0 $B0, tid_x $tid_x, tid_y $tid_y, bid_x $bid_x, bid_y $bid_y")
+    # tid_x, tid_y, bid_x, bid_y = threadIdx().x, threadIdx().y, blockIdx().x, blockIdx().y
+    # @cuprintln("y0 $y0, B0 $B0, tid_x $tid_x, tid_y $tid_y, bid_x $bid_x, bid_y $bid_y")
 
     if B0 <= length(Bgrid) && y0 <= length(ygrid)
         # #= Repayment: in the last period, max U(c,rb,g) s.t. c=y-̃B*rb =#
@@ -314,10 +310,8 @@ end
 # CUDA.synchronize()
 
 
-##
-
 function update_values_expectations!(
-        m::Model_CPU, grids, arrays, arrays_rep, arrays_def, eulers_rep, eulers_def
+        m::Model_GPU, grids, arrays, arrays_rep, arrays_def, eulers_rep, eulers_def
     )
 
     Bgrid, ygrid, P = grids
@@ -406,30 +400,39 @@ end
 # CUDA.synchronize()
 
 
-##
 
+function my_dot_product(xvec, yvec)
+    temp = Float32(0)
+    for i in 1:lastindex(xvec)
+        temp += xvec[i]*yvec[i]
+    end
+    return temp
+end
 
-
-function vr_gridsearch(m::Model_CPU, grids, arrays, arrays_rep, eulers_rep, arrays_temp)
+function vr_gridsearch(m::Model_GPU, grids, arrays, arrays_rep, eulers_rep, arrays_temp)
 
     Bgrid, ygrid, P = grids
     def_policy, v, ev, evd = arrays
     vr, c_rep, rb_rep, Bprime_rep, μ_rep, i_rep, q_rep, qtilde_rep = arrays_rep
     moneyEulerRHS_rep, bondsEulerRHS_rep = eulers_rep
     vs, cs, rbs, μs, qs, is, cps = arrays_temp
-    vstar = Float32(0)
+    vstar = Float32(-Inf)
 
     B0 = (blockIdx().x-1)*blockDim().x + threadIdx().x
     y0 = (blockIdx().y-1)*blockDim().y + threadIdx().y
+
+    tid_x, tid_y, bid_x, bid_y = threadIdx().x, threadIdx().y, blockIdx().x, blockIdx().y
+    @cuprintln("y0 $y0, B0 $B0, tid_x $tid_x, tid_y $tid_y, bid_x $bid_x, bid_y $bid_y")
     
     # xstar, fstar = my_brent(x->B0*x^2+y0*x, Float32(-10), Float32(10))
     # vs[B0,y0] = fstar
     # cs[B0,y0] = xstar
 
     if B0 <= length(Bgrid) && y0 <= length(ygrid)
+        
         for B1 in 1:m.nB
 
-            # res = my_brent(
+            # c, ~ = my_brent(
             #     c -> -U_fn(
             #             m, c, 
             #             (ygrid[y0]+qtilde_rep[B1,y0]*Bgrid[B1]-c)/(
@@ -467,8 +470,11 @@ function vr_gridsearch(m::Model_CPU, grids, arrays, arrays_rep, eulers_rep, arra
             rbs[B1] = rb
             qs[B1] = qtilde_rep[B1, y0] / (rb*(1+μ)*(1+m.r))
             is[B1] = ((1+μ)*rb*ucprime) / bondsEulerRHS_rep[B1, y0]
-            vs[B1] = (c^(1-m.σ))/(1-m.σ) + m.α_m*(rb^(1-m.η))/(1-m.η) + m.β * ev[B1, y0]
+            v = (c^(1-m.σ))/(1-m.σ) + m.α_m*(rb^(1-m.η))/(1-m.η) + m.β * ev[B1, y0]
+            vs[B1] = v
+
             vstar = ifelse(vs[B1]>vstar, vs[B1], vstar)
+            # @cuprintln(vstar)
         end
 
         D = 0.
@@ -478,10 +484,17 @@ function vr_gridsearch(m::Model_CPU, grids, arrays, arrays_rep, eulers_rep, arra
         for i in 1:m.nB
             cps[i] = exp((vs[i]-vstar)/m.ρ_μ)/D
         end
-        
+
         vr[B0,y0] = vstar + m.ρ_μ*log(D)
         
+        # c_rep[B0,y0] = my_dot_product(cps, cs)
+        # rb_rep[B0,y0] = my_dot_product(cps, rbs)
+        # Bprime_rep[B0,y0] = my_dot_product(cps, Bgrid)
+        # q_rep[B0,y0] = my_dot_product(cps, qs)
+        # i_rep[B0,y0] = my_dot_product(cps, is)
+        # μ_rep[B0,y0] = my_dot_product(cps, μs)
 
+        c_rep[B0,y0], rb_rep[B0,y0], Bprime_rep[B0,y0], q_rep[B0,y0], i_rep[B0,y0], μ_rep[B0,y0] = 0., 0., 0., 0., 0., 0.
         for B1 in 1:m.nB
             c_rep[B0,y0] += cps[B1]*cs[B1]
             rb_rep[B0,y0] += cps[B1]*rbs[B1]
@@ -495,39 +508,108 @@ function vr_gridsearch(m::Model_CPU, grids, arrays, arrays_rep, eulers_rep, arra
 
     return nothing
 end
-# vr, c_rep, rb_rep, Bprime_rep, μ_rep, i_rep, q_rep, qtilde_rep = arrays_rep
-# in the main function you'll have to make all these things equal to zero with a fill!
-[CUDA.fill!(matrix, 0) for matrix in arrays_rep[2:7]]
+
+
+# @cuda threads=(1,1) blocks=(1,1) vr_gridsearch(m, grids, arrays, arrays_rep, eulers_rep, arrays_temp)
+# CUDA.synchronize()
+
+
 @cuda threads=(5,5) blocks=(2,2) vr_gridsearch(m, grids, arrays, arrays_rep, eulers_rep, arrays_temp)
 
 
+# RESULTS VARY WITH THE EXECUTIONS!!!
+
+
 ##
 
-A = rand(10^6)
-B = rand(10^6)
+nr = Int32(10^3)
+nc = 100
+A = rand(Float32, nr,nc);
+B = rand(Float32, nr,nc);
 A = CuArray(A)
 B = CuArray(B)
-c = Flota32(0)
+C = CUDA.zeros(Float32, nc)
 
-function f1(X,Y)
-    return sum(X.*Y)
-end
-function f2(X,Y)
-    return @views sum(X[:].*Y[:])
-end
-function f3(X,Y)
-    CUDA.dot(X,Y)
-end
-function f4(X,Y)
-    mapreduce(*, +, X, Y)
+function f1!(X,Y,Z,nr)
+    ic = threadIdx().x
+    for j in 1:nr
+        Z[ic] += X[j,ic]*Y[j,ic]
+    end
+    return nothing
 end
 
-@btime f1(A,B)
-@btime f2(A,B)
-@btime f3(A,B)
-@btime f4(A,B)
+function mydotproduct(X, Y)
+    temp = Float32(0)
+    for i in 1:100
+        temp += X[i]*Y[i]
+    end
+    return temp
+end
+
+@time mydotproduct(A[:,1], B[:,1])
+
+function f2!(X,Y,Z)
+    ic = threadIdx().x
+    # for j in 1:nr
+    #     Z[ic] += X[j,ic]*Y[j,ic]
+    # end
+    Z[ic] = mydotproduct(X[:,ic], Y[:,ic])
+    return nothing
+end
+
+@cuda threads=100 f2!(A,B,C)
+
 
 ##
+
+function f3(X, Y, Z)
+    i = threadIdx().x
+    for j in 1:100
+        Z[i] += X[j,i] * Y[j,i]
+    end
+
+    return nothing
+end
+
+g3(X,Y,Z) = @cuda threads=10 f3(X,Y,Z)
+
+function my_dot_product(xvec, yvec)
+    temp = Float32(0)
+    for i in 1:lastindex(xvec)
+        temp += xvec[i]*yvec[i]
+    end
+    return temp
+end
+
+function f4(X, Y, Z)
+    i = threadIdx().x
+    # xvec = view(X,:,i)
+    # yvec = view(Y,:,i)
+    # temp = mydotproduct(xvec, yvec)
+    # Z[i] = temp
+    Z[i] = my_dot_product(view(X,:,1), view(Y,:,1))
+
+    return nothing
+end
+
+g4(X,Y,Z) = @cuda threads=10 f4(X, Y, Z)
+
+g4(A,B,C4)
+
+nr = Int32(10^2)
+nc = 10
+A = rand(Float32, nr,nc);
+B = rand(Float32, nr,nc);
+A = CuArray(A)
+B = CuArray(B)
+C3 = CUDA.zeros(Float32, nc)
+C4 = CUDA.zeros(Float32, nc)
+@btime g3($A, $B, $C3)
+@btime g4($A, $B, $C4)
+
+##
+
+
 
 #= this is how to check number of threads and blocks =#
 kernel = @cuda launch=false model_init!(arrays_rep)
