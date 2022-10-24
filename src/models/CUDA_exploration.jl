@@ -231,6 +231,7 @@ nb = 150
 
 kernel = @cuda launch=false def_init(CUDA.zeros(ny), 0.5, CuArray(-5*sqrt((0.025^2)/(1-0.025^2)):sqrt((0.025^2)/(1-0.9^2)):5*sqrt((0.025^2)/(1-0.9^2))), 0.5)
 config = launch_configuration(kernel.fun)
+
 threads = min(ny*nb, config.threads)
 blocks = cld(ny*nb, threads)
 # 4992 
